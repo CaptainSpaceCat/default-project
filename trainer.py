@@ -24,13 +24,14 @@ def prepare_data_for_inception(x, device):
     return x.to(device).to(torch.uint8)
 
 
-def prepare_data_for_gan(x, nz, device):
+def prepare_data_for_gan(x, y, nz, device):
     r"""
     Helper function to prepare inputs for model.
     """
 
     return (
         x.to(device),
+        y.to(device),
         torch.randn((x.size(0), nz)).to(device),
     )
 
@@ -59,26 +60,26 @@ def hinge_loss_d(real_preds, fake_preds):
     return F.relu(1.0 - real_preds).mean() + F.relu(1.0 + fake_preds).mean()
 
 
-def compute_loss_g(net_g, net_d, z, loss_func_g):
+def compute_loss_g(net_g, net_d, z, labels, loss_func_g):
     r"""
     General implementation to compute generator loss.
     """
 
-    fakes = net_g(z)
-    fake_preds = net_d(fakes).view(-1)
+    fakes = net_g(z, labels)
+    fake_preds = net_d(fakes, labels).view(-1)
     loss_g = loss_func_g(fake_preds)
 
     return loss_g, fakes, fake_preds
 
 
-def compute_loss_d(net_g, net_d, reals, z, loss_func_d):
+def compute_loss_d(net_g, net_d, reals, z, labels, loss_func_d):
     r"""
     General implementation to compute discriminator loss.
     """
 
-    real_preds = net_d(reals).view(-1)
-    fakes = net_g(z).detach()
-    fake_preds = net_d(fakes).view(-1)
+    real_preds = net_d(reals, labels).view(-1)
+    fakes = net_g(z, labels).detach()
+    fake_preds = net_d(fakes, labels).view(-1)
     loss_d = loss_func_d(real_preds, fake_preds)
 
     return loss_d, fakes, real_preds, fake_preds
@@ -99,7 +100,7 @@ def train_step(net, opt, sch, compute_loss):
     return loss
 
 
-def evaluate(net_g, net_d, dataloader, nz, device, samples_z=None):
+def evaluate(net_g, net_d, dataloader, nz, device, samples_z=None, samples_y=None):
     r"""
     Evaluates model and logs metrics.
     Attributes:
@@ -126,22 +127,24 @@ def evaluate(net_g, net_d, dataloader, nz, device, samples_z=None):
             [],
             [],
         )
-
-        for data, _ in tqdm(dataloader, desc="Evaluating Model"):
+        '''
+        for data, _class in tqdm(dataloader, desc="Evaluating Model"):
 
             # Compute losses and save intermediate outputs
-            reals, z = prepare_data_for_gan(data, nz, device)
+            reals, labels, z = prepare_data_for_gan(data, _class, nz, device)
             loss_d, fakes, real_pred, fake_pred = compute_loss_d(
                 net_g,
                 net_d,
                 reals,
                 z,
+                labels,
                 hinge_loss_d,
             )
             loss_g, _, _ = compute_loss_g(
                 net_g,
                 net_d,
                 z,
+                labels,
                 hinge_loss_g,
             )
 
@@ -158,6 +161,7 @@ def evaluate(net_g, net_d, dataloader, nz, device, samples_z=None):
             kid.update(reals, real=True)
             kid.update(fakes, real=False)
 
+
         # Process metrics
         metrics = {
             "L(G)": torch.stack(loss_gs).mean().item(),
@@ -168,13 +172,13 @@ def evaluate(net_g, net_d, dataloader, nz, device, samples_z=None):
             "FID": fid.compute().item(),
             "KID": kid.compute()[0].item(),
         }
-
+        '''
         # Create samples
         if samples_z is not None:
-            samples = net_g(samples_z)
+            samples = net_g(samples_z, samples_y)
             samples = F.interpolate(samples, 256).cpu()
             samples = vutils.make_grid(samples, nrow=6, padding=4, normalize=True)
-
+        metrics = 0
     return metrics if samples_z is None else (metrics, samples)
 
 
@@ -280,7 +284,7 @@ class Trainer:
         self.logger.add_image("Samples", samples, self.step)
         self.logger.flush()
 
-    def _train_step_g(self, z):
+    def _train_step_g(self, z, labels):
         r"""
         Performs a generator training step.
         """
@@ -293,11 +297,12 @@ class Trainer:
                 self.net_g,
                 self.net_d,
                 z,
+                labels,
                 hinge_loss_g,
             )[0],
         )
 
-    def _train_step_d(self, reals, z):
+    def _train_step_d(self, reals, z, labels):
         r"""
         Performs a discriminator training step.
         """
@@ -311,6 +316,7 @@ class Trainer:
                 self.net_d,
                 reals,
                 z,
+                labels,
                 hinge_loss_d,
             )[0],
         )
@@ -329,13 +335,13 @@ class Trainer:
 
         while True:
             pbar = tqdm(self.train_dataloader)
-            for data, _ in pbar:
+            for data, _class in pbar:
 
                 # Training step
-                reals, z = prepare_data_for_gan(data, self.nz, self.device)
-                loss_d = self._train_step_d(reals, z)
+                reals, labels, z = prepare_data_for_gan(data, _class, self.nz, self.device)
+                loss_d = self._train_step_d(reals, z, labels)
                 if self.step % repeat_d == 0:
-                    loss_g = self._train_step_g(z)
+                    loss_g = self._train_step_g(z, labels)
 
                 pbar.set_description(
                     f"L(G):{loss_g.item():.2f}|L(D):{loss_d.item():.2f}|{self.step}/{max_steps}"
